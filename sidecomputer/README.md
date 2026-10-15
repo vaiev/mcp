@@ -22,9 +22,9 @@ sudo ./bootstrap.sh \
   --mode strict
 ```
 
-Bootstrap prints one JSON line. `strict` sets `command=` and `restrict` on the key and `ForceCommand` for the `sidecomputer` user. Re-running replaces that key line instead of adding another. There is no MCP tool for key rotation; rotation requires explicit owner approval before running this admin command. An admin session or shell on the host alone is not approval. Every `authorized_keys` entry keeps `command=` and `restrict`.
+Bootstrap prints one JSON line. `strict` sets `command=` and `restrict` on the key and `ForceCommand` for the `sidecomputer` user. Re-running with the same key replaces its line instead of adding another. To rotate, obtain explicit owner approval, then run `bootstrap.sh --rotate` with the new public key (`--bot-pubkey`) and the desired profiles. This removes previous SideComputer gate keys and prunes their grants; a plain re-run does not revoke the old key. An admin session or shell alone is not approval; there is no MCP rotation tool. Lines written by bootstrap carry `command=` and `restrict`; bootstrap does not police other lines.
 
-Pin the host key before the client will connect. The client refuses a missing `known_hosts` file (no trust-on-first-use). Fetch the key into a temporary file and print its fingerprint:
+Pin the host key before the client will connect. By default, the client refuses a missing `known_hosts` file. `--accept-new` enables trust-on-first-use (TOFU) and is discouraged; prefer the explicit fingerprint check below. Fetch the key into a temporary file and print its fingerprint:
 
 ```bash
 python3 -m pip install paramiko
@@ -33,7 +33,7 @@ ssh-keyscan -t ed25519 -H HOST > "$host_key_file"
 ssh-keygen -lf "$host_key_file"
 ```
 
-Compare the printed fingerprint against the host's fingerprint obtained out-of-band through the provider console or trusted bootstrap output. Only if they match, append the verified key and connect:
+Compare the printed fingerprint with `host_key_fingerprint` from trusted bootstrap JSON output, or run `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the provider console and compare its fingerprint. Only if they match, append the verified key and connect:
 
 ```bash
 cat "$host_key_file" >> ~/.ssh/known_hosts
@@ -42,6 +42,8 @@ export SIDECOMPUTER_SSH_KEY="$(cat ~/.ssh/sidecomputer-bot)"
 python3 client/sc_client.py --host HOST --user sidecomputer \
   --key-env SIDECOMPUTER_SSH_KEY --known-hosts ~/.ssh/known_hosts tools
 ```
+
+The client currently supports only `--key-env`, with no key-file option. This exposes the private key to the process environment, including child processes that inherit it. Keep the source key file at mode `0600` and unset `SIDECOMPUTER_SSH_KEY` when finished.
 
 `compute` is a consequential profile, so the task waits until someone at the host console approves it:
 
@@ -139,7 +141,7 @@ Other bots never receive the key or the host address. They hand the SideComputer
 
 ```bash
 sudo ./bootstrap.sh --profile compute,repo-bridge \
-  --bot-pubkey "ssh-ed25519 AAAA... bot" --mode strict [--lock]
+  --bot-pubkey "ssh-ed25519 AAAA... bot" --mode strict [--lock] [--rotate]
 ```
 
 This creates `sidecomputer` (login, password locked), `sc-gate`, `sc-worker`, and `sc-task`. The login user is not in the spool groups. Only `sc-gate` can create queue files. Only `sc-worker` can write results. `sc-task` runs the command and cannot read the queue, other tasks' directories, private logs, or the audit log. The audit log is append-only and hash-chained.
@@ -153,7 +155,7 @@ Profiles are validated before they are installed. Invalid profile files are igno
 - **strict** (use this): `command="/usr/local/bin/sidecomputer-gate",restrict` on the key, plus `ForceCommand` for the user. `--lock` also empties the admin user's `authorized_keys` (a backup is left beside it) and sets `PermitRootLogin no`.
 - **open** (less safe): the bot key still has `command=` and `restrict`, so it still cannot get a shell. sshd does not set `ForceCommand` for the whole user. Use it only while debugging.
 
-After `--lock`, the only SSH path left is the gate. Re-bootstrap, key rotation, and profile changes need the console or a provider rescue path, or an admin key you kept somewhere else. Key rotation still requires explicit owner approval; access to an admin session or shell through any of these paths alone is not approval.
+In strict mode, `--lock` backs up the selected admin user's `authorized_keys` to `authorized_keys.sc-locked.bak` and empties it; it also sets `PermitRootLogin no`. Other users' keys are untouched, and `--lock` makes no additional password-authentication changes beyond the bootstrap defaults above, so it does not guarantee that the gate is the only SSH path. Keep console/provider recovery access for administration. To rotate, obtain explicit owner approval and run `bootstrap.sh --rotate` with the new public key and desired profiles; a plain re-run does not revoke the old key. Access to an admin session or shell alone is not approval.
 
 ## Tasks
 

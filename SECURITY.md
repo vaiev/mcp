@@ -19,4 +19,4 @@ Please report a vulnerability through a private GitHub security advisory on [vai
 - Redaction of formats the published patterns do not match. Treat redaction as a backstop, not a place to put secrets.
 - Compromise of root on the host, or of the machine that holds the bot's private key, beyond what the gate already refuses to do with that key.
 
-Key rotation requires explicit owner approval before an admin runs `bootstrap.sh` on the host. An admin session or shell on the host alone is not approval. The gate does not expose a tool for it.
+Key rotation requires explicit owner approval before an admin runs `bootstrap.sh --rotate` on the host with the new public key (`--bot-pubkey`). This removes previous SideComputer gate keys and prunes their grants; a plain re-run does not revoke the old key. An admin session or shell on the host alone is not approval. The gate does not expose a tool for it.

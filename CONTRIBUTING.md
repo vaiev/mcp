@@ -9,7 +9,7 @@ python3 -m pip install paramiko
 python3 sidecomputer/tests/test_sidecomputer.py
 ```
 
-Paramiko is only needed for the SSH client tests. Without it those tests skip, and the rest still run. GitHub Actions runs the same file on Ubuntu with Python 3.12.
+Paramiko is only needed for the SSH client tests. Without it those tests skip, and the rest still run. GitHub Actions runs the same file on Ubuntu with Python 3.12. The [secret-scan workflow](.github/workflows/secret-scan.yml) also runs Gitleaks against Git history on pull requests and pushes to `main`.
 
 `SC_PREFIX` and `SC_DRY_RUN=1` let `sidecomputer/bootstrap.sh` install into a scratch directory. You do not need root for the unit tests.
 
@@ -19,6 +19,6 @@ Paramiko is only needed for the SSH client tests. Without it those tests skip, a
 - Add or extend a test for a behavior change, especially anything on the trust boundary (profiles, artifacts, the audit log, grants, approval, host keys).
 - Do not commit private keys, `audit.key`, `.pem` files, or real host addresses. The public key in the tests is a fixture.
 - Do not add an MCP tool that rotates the SSH key, approves a task, or rewrites `authorized_keys`. Those stay on the host, with an admin.
-- Bootstrap must keep `command=` and `restrict` on every bot key line.
+- Lines written by bootstrap must carry `command=` and `restrict`; bootstrap does not police other `authorized_keys` lines.
 
 Security-sensitive changes need review before they merge. See [SECURITY.md](SECURITY.md) for reports.
