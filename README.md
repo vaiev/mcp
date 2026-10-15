@@ -1,11 +1,19 @@
 # VAIEV MCP servers
 
-This repo collects [VAIEV](https://github.com/vaiev) MCP servers.
+MCP servers published by [VAIEV](https://github.com/vaiev).
 
 ## Servers
 
 | Server | What it does |
 |---|---|
-| [`sidecomputer`](sidecomputer/README.md) | An SSH forced-command MCP stdio gate that lets bots submit tasks to a 24/7 host and get back only status plus a redacted summary. |
+| [`sidecomputer`](sidecomputer/README.md) | An SSH forced-command MCP gate. Bots submit tasks to a 24/7 host and get back status plus a redacted summary. |
 
-Companion bot skills live in [vaiev/skills](https://github.com/vaiev/skills).
+Start with the [SideComputer quickstart](sidecomputer/README.md#quickstart).
+
+Companion bot skills live in [vaiev/skills](https://github.com/vaiev/skills). The SideComputer dispatch skill is `sidecomputer/dispatch/SKILL.md`.
+
+## Project
+
+- [Contributing](CONTRIBUTING.md)
+- [Security](SECURITY.md)
+- [Apache-2.0](LICENSE)
