@@ -73,7 +73,14 @@ def t_submit(args):
     folder = "pending" if needs_approval else "queue"
     L.log("audit.log", {"op": "submit", "id": tid, "profile": profile["name"], "kind": kind,
                         "requester": requester, "key_id": key_id, "state": task["state"]})
-    L.write_json(L.spool(folder, tid + ".json"), task)
+    try:
+        L.write_json(L.spool(folder, tid + ".json"), task)
+    except Exception:
+        try:
+            L.log("audit.log", {"op": "enqueue_failed", "id": tid})
+        except Exception:
+            pass
+        raise
     return {"id": tid, "state": task["state"], "timeout": timeout}
 
 def t_status(args):

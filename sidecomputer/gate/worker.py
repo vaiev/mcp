@@ -241,6 +241,12 @@ def once():
         if blocked:
             return _reject(task, blocked)
         try:
+            L.log("audit.log", {"op": "start", "id": tid, "profile": task["profile"],
+                                "kind": task["kind"], "key_id": task.get("key_id", ""),
+                                "requester": task.get("requester", "")})
+        except Exception:
+            return _reject(task, "could not write start audit entry", 126)
+        try:
             adir = prepare_workdir(tid)
             out_path, err_path = prepare_logs(tid)
             argv = build_argv(task, profile)

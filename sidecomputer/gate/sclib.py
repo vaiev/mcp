@@ -250,17 +250,24 @@ def approve_task(tid, approver="root"):
         raise ValueError("task is not awaiting approval")
     os.makedirs(spool("approvals"), exist_ok=True)
     record = {"id": tid, "task_hash": task_hash(task), "approver": approver, "ts": time.time_ns()}
+    log("audit.log", {"op": "approve", "id": tid, "approver": approver,
+                      "requester": task.get("requester", ""), "key_id": task.get("key_id", "")})
     write_json(approval_path(tid), record)
     task["state"] = "queued"
     task["approved_by"] = approver
-    write_json(spool("queue", tid + ".json"), task)
+    try:
+        write_json(spool("queue", tid + ".json"), task)
+    except Exception:
+        try:
+            log("audit.log", {"op": "enqueue_failed", "id": tid})
+        except Exception:
+            pass
+        raise
     if source == "pending":
         try:
             os.unlink(spool("pending", tid + ".json"))
         except FileNotFoundError:
             pass
-    log("audit.log", {"op": "approve", "id": tid, "approver": approver,
-                      "requester": task.get("requester", ""), "key_id": task.get("key_id", "")})
     return record
 
 def revalidate(task, profile):
@@ -454,6 +461,12 @@ def write_grant(path, fingerprint, profiles):
         fh.write("\n")
     os.chmod(tmp, 0o644)
     os.replace(tmp, path)
+
+def prune_grants(path, keep_fp):
+    """Remove grants for every key except the current bootstrap key."""
+    data = read_json(path)
+    data["keys"] = {fp: spec for fp, spec in data["keys"].items() if fp == keep_fp}
+    write_json(path, data, mode=0o644)
 
 def current_key_id():
     return os.environ.get("SC_KEY_ID", "")

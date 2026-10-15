@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SideComputer bootstrap (Debian/Ubuntu first). Run as root on the target host. Idempotent.
-# Usage: bootstrap.sh --profile NAME[,NAME] --bot-pubkey "ssh-ed25519 AAAA..."|FILE --mode strict|open [--lock] [--admin-user USER]
+# Usage: bootstrap.sh --profile NAME[,NAME] --bot-pubkey "ssh-ed25519 AAAA..."|FILE --mode strict|open [--lock] [--rotate] [--admin-user USER]
 set -euo pipefail
-PROFILES=""; PUBKEY=""; MODE="strict"; LOCK=0; ADMIN_USER="${SUDO_USER:-root}"
+PROFILES=""; PUBKEY=""; MODE="strict"; LOCK=0; ROTATE=0; ADMIN_USER="${SUDO_USER:-root}"
 SRC="$(cd "$(dirname "$0")" && pwd)"
 PREFIX="${SC_PREFIX:-}"
 DRY="${SC_DRY_RUN:-0}"
@@ -12,6 +12,7 @@ while [ $# -gt 0 ]; do case "$1" in
   --bot-pubkey) PUBKEY="$2"; shift 2;;
   --mode) MODE="$2"; shift 2;;
   --lock) LOCK=1; shift;;
+  --rotate) ROTATE=1; shift;;
   --admin-user) ADMIN_USER="$2"; shift 2;;
   -h|--help) sed -n '2,4p' "$0"; exit 0;;
   *) die "unknown arg $1";; esac; done
@@ -84,8 +85,8 @@ fi
 run chown root:sc-audit "$ETC/audit.key"
 chmod 0640 "$ETC/audit.key"
 FP="$(SC_PUB="$PUBKEY" python3 -c 'import os,sys; sys.path.insert(0, os.environ["SC_SRC_GATE"]); import sclib; print(sclib.fingerprint_pubkey(os.environ["SC_PUB"]))')"
-SC_FP="$FP" SC_PROFILES_CSV="$PROFILES" SC_GRANTS_PATH="$ETC/grants.json" \
-  python3 -c 'import os,sys; sys.path.insert(0, os.environ["SC_SRC_GATE"]); import sclib; sclib.write_grant(os.environ["SC_GRANTS_PATH"], os.environ["SC_FP"], [p for p in os.environ["SC_PROFILES_CSV"].split(",") if p])'
+SC_ROTATE="$ROTATE" SC_FP="$FP" SC_PROFILES_CSV="$PROFILES" SC_GRANTS_PATH="$ETC/grants.json" \
+  python3 -c 'import os,sys; sys.path.insert(0, os.environ["SC_SRC_GATE"]); import sclib; sclib.write_grant(os.environ["SC_GRANTS_PATH"], os.environ["SC_FP"], [p for p in os.environ["SC_PROFILES_CSV"].split(",") if p]); sclib.prune_grants(os.environ["SC_GRANTS_PATH"], os.environ["SC_FP"]) if os.environ["SC_ROTATE"] == "1" else None'
 chmod 0644 "$ETC/grants.json" || true
 
 # 6. systemd worker. Egress is denied unless a profile is given a privileged scope.
@@ -135,6 +136,10 @@ chmod 0440 "$SUDOERS_D/sidecomputer" || true
 # 8. authorized_keys. environment= names the key so the gate can apply grants.
 AK="$HOMEDIR/.ssh/authorized_keys"; touch "$AK"
 { grep -vF "$KEYTYPE_B64" "$AK" | grep -v '^# OPEN MODE' || true; } > "$AK.new"
+if [ "$ROTATE" = 1 ]; then
+  { grep -vE 'command="[^"]*sidecomputer-gate|[[:space:]]sidecomputer-bot(-open)?([[:space:]]|$)' "$AK.new" || true; } > "$AK.rotate"
+  mv "$AK.rotate" "$AK.new"
+fi
 # Key rotation is admin-only (this script). Every entry keeps command= and restrict;
 # there is no gate tool that can rewrite authorized_keys.
 if [ "$MODE" = strict ]; then
@@ -174,6 +179,10 @@ if [ "$DRY" != 1 ]; then sshd -t && (systemctl reload ssh 2>/dev/null || systemc
 WARN=""
 [ "$MODE" = open ] && WARN="open mode is less safe because ForceCommand is not set for the user; the bot key still has command= and restrict"
 [ "$LOCKED" = true ] && WARN="admin SSH key removed; recovery needs console/provider access"
+HOST_KEY_FINGERPRINT=""
+if [ -f "$PREFIX/etc/ssh/ssh_host_ed25519_key.pub" ]; then
+  HOST_KEY_FINGERPRINT="$(ssh-keygen -lf "$PREFIX/etc/ssh/ssh_host_ed25519_key.pub")"
+fi
 PROFILES_JSON="[$(IFS=,; echo "${INSTALLED[*]}")]"
-python3 -c 'import json,sys; print(json.dumps({"ok": True, "mode": sys.argv[1], "locked": sys.argv[2]=="true", "profiles": json.loads(sys.argv[3]), "spool": "/var/lib/sidecomputer", "gate": "/usr/local/bin/sidecomputer-gate", "worker_unit": "sidecomputer-worker.service", "login_user": "sidecomputer", "warning": sys.argv[4]}))' \
-  "$MODE" "$LOCKED" "$PROFILES_JSON" "$WARN"
+python3 -c 'import json,sys; print(json.dumps({"ok": True, "mode": sys.argv[1], "locked": sys.argv[2]=="true", "profiles": json.loads(sys.argv[3]), "spool": "/var/lib/sidecomputer", "gate": "/usr/local/bin/sidecomputer-gate", "worker_unit": "sidecomputer-worker.service", "login_user": "sidecomputer", "warning": sys.argv[4], "host_key_fingerprint": sys.argv[5]}))' \
+  "$MODE" "$LOCKED" "$PROFILES_JSON" "$WARN" "$HOST_KEY_FINGERPRINT"

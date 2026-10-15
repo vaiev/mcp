@@ -79,6 +79,78 @@ class JsonRpc(unittest.TestCase):
         e, out = call("submit_task", profile="echo", prompt="hi", timeout=999)
         self.assertFalse(e); self.assertEqual(out["timeout"], 5)                           # clamped
 
+class AuditFailures(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        patch = mock.patch.object(sclib, "SPOOL", self.tmp.name)
+        patch.start()
+        self.addCleanup(patch.stop)
+        sclib.ensure_spool()
+
+    def test_approval_audit_failure_has_no_side_effects(self):
+        tid = gate.t_submit({"profile": "compute", "command": "echo hello"})["id"]
+        pending = sclib.read_json(sclib.spool("pending", tid + ".json"))
+        with mock.patch.object(sclib, "log", side_effect=OSError("audit unavailable")):
+            with self.assertRaises(OSError):
+                sclib.approve_task(tid)
+        self.assertIsNone(sclib.load_approval(tid))
+        self.assertFalse(os.path.exists(sclib.spool("queue", tid + ".json")))
+        self.assertEqual(sclib.read_json(sclib.spool("pending", tid + ".json")), pending)
+
+    def test_enqueue_failure_is_audited_and_original_error_raised(self):
+        for approve in (False, True):
+            for audit_fails in (False, True):
+                with self.subTest(approve=approve, audit_fails=audit_fails):
+                    tid = gate.t_submit({"profile": "compute", "command": "echo hello"})["id"] if approve else sclib.new_id()
+                    failure = OSError("queue unavailable")
+                    write = sclib.write_json
+                    log = sclib.log
+                    def fail_queue(path, obj, *args, **kwargs):
+                        if path == sclib.spool("queue", tid + ".json"):
+                            raise failure
+                        return write(path, obj, *args, **kwargs)
+                    def audit(path, event):
+                        if event["op"] == "enqueue_failed" and audit_fails:
+                            raise OSError("audit unavailable")
+                        return log(path, event)
+                    with mock.patch.object(sclib, "new_id", return_value=tid), mock.patch.object(sclib, "write_json", side_effect=fail_queue), mock.patch.object(sclib, "log", side_effect=audit) as logged:
+                        with self.assertRaises(OSError) as caught:
+                            if approve:
+                                sclib.approve_task(tid)
+                            else:
+                                gate.t_submit({"profile": "echo", "prompt": "hello"})
+                    self.assertIs(caught.exception, failure)
+                    events = [c.args[1] for c in logged.call_args_list]
+                    self.assertEqual([e["op"] for e in events], ["approve" if approve else "submit", "enqueue_failed"])
+                    self.assertTrue(all(e["id"] == tid for e in events))
+                    self.assertFalse(os.path.exists(sclib.spool("queue", tid + ".json")))
+
+    def test_worker_start_audit_precedes_execution(self):
+        tid = gate.t_submit({"profile": "echo", "prompt": "hello", "requester": "tester"})["id"]
+        prepare = worker.prepare_workdir
+        def checked_prepare(task_id):
+            events = [e for e in sclib.read_audit() if e.get("op") == "start" and e.get("id") == tid]
+            self.assertEqual(len(events), 1)
+            self.assertEqual({k: events[0][k] for k in ("profile", "kind", "requester", "key_id")},
+                             {"profile": "echo", "kind": "prompt", "requester": "tester", "key_id": "test-key"})
+            return prepare(task_id)
+        with mock.patch.object(worker, "prepare_workdir", side_effect=checked_prepare):
+            self.assertEqual(worker.once()["state"], "succeeded")
+
+    def test_worker_audit_failure_refuses_execution(self):
+        tid = gate.t_submit({"profile": "echo", "prompt": "hello"})["id"]
+        with mock.patch.object(sclib, "log", side_effect=OSError("audit unavailable")), mock.patch.object(worker.subprocess, "Popen") as execute:
+            try:
+                worker.once()
+            except OSError:
+                pass
+        execute.assert_not_called()
+        state, task = sclib.find_task(tid)
+        self.assertEqual(state, "done")
+        self.assertIn(task["state"], ("failed", "rejected"))
+        self.assertIn("audit", task["summary"])
+
 class Redaction(unittest.TestCase):
     def test_secrets(self):
         s = sclib.redact("token=abc123 key sk-ABCDEFGH12345678 ip 10.1.2.3 mail a@b.io "
@@ -523,6 +595,46 @@ class ReviewFixes(unittest.TestCase):
         os.symlink("/etc/passwd", link)
         self.assertFalse(chown_artifact.member_stays_inside(link, root))
         self.assertTrue(chown_artifact.member_stays_inside(os.path.join(root, "ok"), root))
+
+    def test_bootstrap_rotation_and_host_fingerprint(self):
+        with tempfile.TemporaryDirectory() as pre:
+            env = dict(os.environ, SC_PREFIX=pre, SC_DRY_RUN="1")
+            script = ["bash", os.path.join(ROOT, "bootstrap.sh"), "--profile", "compute", "--bot-pubkey"]
+            def bootstrap(key, *options):
+                result = subprocess.run(script + [key] + list(options), capture_output=True, text=True, env=env)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return json.loads(result.stdout)
+            first = bootstrap(PUBKEY)
+            self.assertEqual(first.get("host_key_fingerprint"), "")
+            ak = os.path.join(pre, "home/sidecomputer/.ssh/authorized_keys")
+            old_line = open(ak).read().strip()
+            with open(ak, "a") as fh:
+                fh.write('command="/usr/local/bin/sidecomputer-gate",restrict ssh-ed25519 AAAA legacy\n')
+                fh.write('ssh-ed25519 AAAA sidecomputer-bot\n')
+                fh.write('ssh-ed25519 AAAA unrelated-admin\n')
+            host = os.path.join(pre, "etc/ssh/ssh_host_ed25519_key")
+            new_key = "ssh-ed25519 " + base64.b64encode(b"replacement key").decode() + " new-bot"
+            with open(host + ".pub", "w") as fh:
+                fh.write(new_key + "\n")
+            expected = "256 SHA256:test-host sidecomputer-host (ED25519)"
+            bindir = os.path.join(pre, "bin")
+            os.mkdir(bindir)
+            keygen = os.path.join(bindir, "ssh-keygen")
+            with open(keygen, "w") as fh:
+                fh.write('#!/bin/sh\n[ "$1" = "-lf" ] && [ "$2" = "$SC_PREFIX/etc/ssh/ssh_host_ed25519_key.pub" ] || exit 1\n')
+                fh.write("echo '" + expected + "'\n")
+            os.chmod(keygen, 0o755)
+            env["PATH"] = bindir + os.pathsep + env["PATH"]
+            rotated = bootstrap(new_key, "--rotate")
+            self.assertEqual(rotated["host_key_fingerprint"], expected)
+            lines = open(ak).read().splitlines()
+            self.assertNotIn(old_line, lines)
+            self.assertFalse(any("legacy" in line for line in lines))
+            self.assertNotIn('ssh-ed25519 AAAA sidecomputer-bot', lines)
+            self.assertIn('ssh-ed25519 AAAA unrelated-admin', lines)
+            self.assertTrue(any(new_key.split()[1] in line and "sidecomputer-bot" in line for line in lines))
+            grants = sclib.load_grants(os.path.join(pre, "etc/sidecomputer/grants.json"))
+            self.assertEqual(grants, {sclib.fingerprint_pubkey(new_key): {"profiles": ["compute"]}})
 
     def test_bootstrap_lockdown_and_die_json(self):
         text = open(os.path.join(ROOT, "bootstrap.sh")).read()
