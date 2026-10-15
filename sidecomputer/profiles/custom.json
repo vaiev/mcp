@@ -1,0 +1,2 @@
+{"name":"custom","description":"Admin-defined template; edit then re-run bootstrap","allow_command":true,
+ "max_timeout":600,"memory_max":"1G","cpu_quota":"100%","artifact_max_bytes":65536,"packages":[],"mcps":[]}
