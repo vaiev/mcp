@@ -1,3 +1,4 @@
 {"name":"worker-cli-agents","description":"Headless CLI coding agents driven by prompt","allow_command":false,
- "prompt_runner":["sc-agent-runner","{prompt}"],"max_timeout":3600,"memory_max":"4G","cpu_quota":"200%",
- "artifact_max_bytes":262144,"packages":["git","nodejs","npm"],"mcps":[]}
+ "prompt_runner":["sc-agent-runner","--","{prompt}"],"max_timeout":3600,"memory_max":"4G","cpu_quota":"200%",
+ "artifact_max_bytes":262144,"packages":["git","nodejs","npm"],"mcps":[],
+ "network":false,"requires_approval":true}
