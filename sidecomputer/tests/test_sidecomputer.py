@@ -1,4 +1,5 @@
 import base64, io, json, os, resource, stat, subprocess, sys, tempfile, time, unittest, shutil
+from unittest import mock
 HERE = os.path.dirname(os.path.abspath(__file__)); ROOT = os.path.dirname(HERE)
 GATE = os.path.join(ROOT, "gate")
 TMP = tempfile.mkdtemp(prefix="sc-test-")
@@ -41,6 +42,22 @@ def call(_tool, **args):
     res = r["result"]; return res["isError"], json.loads(res["content"][0]["text"])
 
 class JsonRpc(unittest.TestCase):
+    def test_health_artifact_redaction(self):
+        error, response = call("health")
+        self.assertFalse(error)
+        self.assertEqual(response.get("artifact_redaction"), "all")
+
+    def test_submit_audit_key_unreadable(self):
+        for profile, payload in (("echo", {"prompt": "hello"}), ("compute", {"command": "echo hello"})):
+            with self.subTest(profile=profile):
+                before = {folder: set(os.listdir(sclib.spool(folder))) for folder in ("queue", "pending")}
+                with mock.patch.object(sclib, "_audit_key", side_effect=PermissionError("audit key unreadable")):
+                    error, response = call("submit_task", profile=profile, **payload)
+                self.assertTrue(error)
+                self.assertEqual(response, {"error": "internal error"})
+                for folder in before:
+                    self.assertEqual(set(os.listdir(sclib.spool(folder))), before[folder])
+
     def test_initialize_and_list(self):
         r = gate.handle({"jsonrpc": "2.0", "id": 7, "method": "initialize", "params": {}})
         self.assertEqual(r["id"], 7); self.assertIn("tools", r["result"]["capabilities"])
@@ -159,6 +176,12 @@ class EndToEnd(unittest.TestCase):
         self.assertEqual(json.loads(p.stdout)["error"]["code"], -32700)
 
 class Bootstrap(unittest.TestCase):
+    def test_audit_key_ownership_and_mode(self):
+        with open(os.path.join(ROOT, "bootstrap.sh")) as fh:
+            script = fh.read()
+        self.assertIn('run chown root:sc-audit "$ETC/audit.key"', script)
+        self.assertIn('chmod 0640 "$ETC/audit.key"\n', script)
+
     def run_bs(self, prefix, *a):
         env = dict(os.environ, SC_PREFIX=prefix, SC_DRY_RUN="1")
         p = subprocess.run(["bash", os.path.join(ROOT, "bootstrap.sh")] + list(a), capture_output=True, text=True, env=env)

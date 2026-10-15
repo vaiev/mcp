@@ -71,9 +71,9 @@ def t_submit(args):
             "state": "pending_approval" if needs_approval else "queued", "submitted_at": time.time(),
             "requester": requester, "key_id": key_id}
     folder = "pending" if needs_approval else "queue"
-    L.write_json(L.spool(folder, tid + ".json"), task)
     L.log("audit.log", {"op": "submit", "id": tid, "profile": profile["name"], "kind": kind,
                         "requester": requester, "key_id": key_id, "state": task["state"]})
+    L.write_json(L.spool(folder, tid + ".json"), task)
     return {"id": tid, "state": task["state"], "timeout": timeout}
 
 def t_status(args):
@@ -199,7 +199,7 @@ def t_health(_args):
                 counts[state] += 1
     heartbeat = L.spool("worker.heartbeat")
     age = time.time() - os.path.getmtime(heartbeat) if os.path.exists(heartbeat) else None
-    return {"ok": True, "version": VERSION, "counts": counts,
+    return {"ok": True, "version": VERSION, "counts": counts, "artifact_redaction": "all",
             "worker_alive": age is not None and age < 30, "profiles": len(L.granted_profiles())}
 
 HANDLERS = {"submit_task": t_submit, "task_status": t_status, "list_tasks": t_list, "cancel_task": t_cancel,

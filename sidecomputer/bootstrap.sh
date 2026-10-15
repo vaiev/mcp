@@ -81,7 +81,8 @@ SC_SPOOL_ROOT="$SPOOL" SC_APPLY_CHOWN="$([ "$DRY" = 1 ] && echo 0 || echo 1)" \
 if [ ! -s "$ETC/audit.key" ]; then
   (umask 077; head -c 32 /dev/urandom > "$ETC/audit.key")
 fi
-chmod 0640 "$ETC/audit.key" || true
+run chown root:sc-audit "$ETC/audit.key"
+chmod 0640 "$ETC/audit.key"
 FP="$(SC_PUB="$PUBKEY" python3 -c 'import os,sys; sys.path.insert(0, os.environ["SC_SRC_GATE"]); import sclib; print(sclib.fingerprint_pubkey(os.environ["SC_PUB"]))')"
 SC_FP="$FP" SC_PROFILES_CSV="$PROFILES" SC_GRANTS_PATH="$ETC/grants.json" \
   python3 -c 'import os,sys; sys.path.insert(0, os.environ["SC_SRC_GATE"]); import sclib; sclib.write_grant(os.environ["SC_GRANTS_PATH"], os.environ["SC_FP"], [p for p in os.environ["SC_PROFILES_CSV"].split(",") if p])'
