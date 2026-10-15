@@ -7,10 +7,13 @@ A 24/7 Linux host that one owner's bots can use as a second computer. One bot ho
 On the bot's machine, make a key and keep the private half there:
 
 ```bash
-ssh-keygen -t ed25519 -f sidecomputer-bot -N ""
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/sidecomputer-bot -N ""
+chmod 600 ~/.ssh/sidecomputer-bot
 ```
 
-On the host, as root, install one or more profiles and pin that public key to the gate:
+Keep the private key permissions at `600`. Copy only `~/.ssh/sidecomputer-bot.pub` to the host as `sidecomputer-bot.pub`. On the host, as root, install one or more profiles and pin that public key to the gate:
 
 ```bash
 sudo ./bootstrap.sh \
@@ -19,14 +22,23 @@ sudo ./bootstrap.sh \
   --mode strict
 ```
 
-Bootstrap prints one JSON line. `strict` sets `command=` and `restrict` on the key and `ForceCommand` for the `sidecomputer` user. Re-running replaces that key line instead of adding another. There is no MCP tool for key rotation; rotation is this admin command, and every `authorized_keys` entry keeps `command=` and `restrict`.
+Bootstrap prints one JSON line. `strict` sets `command=` and `restrict` on the key and `ForceCommand` for the `sidecomputer` user. Re-running replaces that key line instead of adding another. There is no MCP tool for key rotation; rotation requires explicit owner approval before running this admin command. An admin session or shell on the host alone is not approval. Every `authorized_keys` entry keeps `command=` and `restrict`.
 
-Pin the host key before the client will connect. The client refuses a missing `known_hosts` file (no trust-on-first-use). `--accept-new` is the one-time opt-in:
+Pin the host key before the client will connect. The client refuses a missing `known_hosts` file (no trust-on-first-use). Fetch the key into a temporary file and print its fingerprint:
 
 ```bash
 python3 -m pip install paramiko
-ssh-keyscan -H HOST >> ~/.ssh/known_hosts
-export SIDECOMPUTER_SSH_KEY="$(cat sidecomputer-bot)"
+host_key_file=$(mktemp)
+ssh-keyscan -t ed25519 -H HOST > "$host_key_file"
+ssh-keygen -lf "$host_key_file"
+```
+
+Compare the printed fingerprint against the host's fingerprint obtained out-of-band through the provider console or trusted bootstrap output. Only if they match, append the verified key and connect:
+
+```bash
+cat "$host_key_file" >> ~/.ssh/known_hosts
+rm -f "$host_key_file"
+export SIDECOMPUTER_SSH_KEY="$(cat ~/.ssh/sidecomputer-bot)"
 python3 client/sc_client.py --host HOST --user sidecomputer \
   --key-env SIDECOMPUTER_SSH_KEY --known-hosts ~/.ssh/known_hosts tools
 ```
@@ -141,7 +153,7 @@ Profiles are validated before they are installed. Invalid profile files are igno
 - **strict** (use this): `command="/usr/local/bin/sidecomputer-gate",restrict` on the key, plus `ForceCommand` for the user. `--lock` also empties the admin user's `authorized_keys` (a backup is left beside it) and sets `PermitRootLogin no`.
 - **open** (less safe): the bot key still has `command=` and `restrict`, so it still cannot get a shell. sshd does not set `ForceCommand` for the whole user. Use it only while debugging.
 
-After `--lock`, the only SSH path left is the gate. Re-bootstrap, key rotation, and profile changes need the console or a provider rescue path, or an admin key you kept somewhere else.
+After `--lock`, the only SSH path left is the gate. Re-bootstrap, key rotation, and profile changes need the console or a provider rescue path, or an admin key you kept somewhere else. Key rotation still requires explicit owner approval; access to an admin session or shell through any of these paths alone is not approval.
 
 ## Tasks
 
