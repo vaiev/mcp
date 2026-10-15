@@ -1,0 +1,2 @@
+{"name":"repo-bridge","description":"git clone/build/test of declared repos","allow_command":true,
+ "max_timeout":1800,"memory_max":"2G","cpu_quota":"150%","artifact_max_bytes":262144,"packages":["git","make"],"mcps":[]}
