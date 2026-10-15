@@ -1,2 +1,7 @@
 __pycache__/
 *.pyc
+*.pem
+audit.key
+sidecomputer-bot
+sidecomputer-bot.pub
+id_*
