@@ -7,6 +7,108 @@ class T(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(); self.addCleanup(__import__("shutil").rmtree, self.tmp)
         hub.DB = os.path.join(self.tmp, "t.db"); self.c = hub.connect(); self.addCleanup(self.c.close)
+    def cli(self, *args, bot="owner"):
+        env = dict(os.environ, HUB_DB=hub.DB, HUB_EMBED="none")
+        env.pop("HUB_BOT", None)
+        if bot is not None: env["HUB_BOT"] = bot
+        return subprocess.run([sys.executable, os.path.join(D, "hub.py"), *args],
+                              env=env, capture_output=True, text=True)
+
+    def test_every_text_write_path_refuses_sensitive_fields(self):
+        for bad in ("ghp_" + "a" * 24, ".".join(["10", "0", "0", "12"])):
+            with self.subTest(sensitive=bad): self.check_text_write_paths(bad)
+
+    def check_text_write_paths(self, bad):
+        paths = [
+            (["note", "add", "title"], ["--body", "--tags", "--bot", "--project"]),
+            (["work", "claim", "task", "--project", "p"], ["--branch", "--notes", "--bot", "--project"]),
+            (["handoff", "add", "recipient", "body"], ["--bot", "--project"]),
+            (["decision", "add", "title", "--project", "p"], ["--rationale", "--bot", "--project"]),
+        ]
+        for base, flags in paths:
+            for flag in flags:
+                with self.subTest(base=base, field=flag):
+                    self.assertNotEqual(self.cli(*base, flag, bad).returncode, 0)
+        for args in (["note", "add", bad], ["work", "claim", bad, "--project", "p"],
+                     ["handoff", "add", bad, "body"], ["handoff", "add", "recipient", bad],
+                     ["decision", "add", bad, "--project", "p"]):
+            with self.subTest(args=args): self.assertNotEqual(self.cli(*args).returncode, 0)
+        wid = hub.work_claim(self.c, "owner", "p", "safe " + str(self.c.total_changes))
+        did = hub.decision_add(self.c, "p", "safe")
+        for args in (["work", "update", str(wid), "--branch", bad],
+                     ["work", "update", str(wid), "--notes", bad],
+                     ["work", "release", str(wid), "--notes", bad],
+                     ["decision", "set", str(did), "accepted", "--bot", bad]):
+            with self.subTest(args=args): self.assertNotEqual(self.cli(*args).returncode, 0)
+
+    def test_shared_guard_and_redaction_patterns(self):
+        samples = ["github_pat_" + "a" * 30,
+                   "-----BEGIN RSA PRIVATE KEY-----\nKEYMATERIAL",
+                   "-----BEGIN PRIVATE KEY\nKEYMATERIAL",
+                   *['"' + key + '":"short"' for key in ("password", "token", "secret", "api_key")]]
+        for value in samples:
+            with self.subTest(value=value):
+                with self.assertRaises(SystemExit): hub.check_secret(value)
+                clean = hub.redact(value)
+                self.assertEqual(clean, "<redacted>")
+                hub.check_secret(clean)
+                hub.ingest_text(self.c, "safe.md", "Useful documentation with enough content to store. " + value, force=True)
+                self.assertNotIn(value, self.c.execute("SELECT body FROM docs").fetchone()[0])
+
+    def test_ingest_sensitive_metadata_refused_without_mutation(self):
+        for value in ("https://user:pass@example.com/doc", "https://example.com/?token=x",
+                      "/docs/password=short/spec.md", "https://example.com/?%74oken=hidden"):
+            for field in ("source", "url", "project"):
+                with self.subTest(value=value, field=field):
+                    kwargs = dict(source="safe.md", text="Useful documentation " * 5, project="p", url=None)
+                    kwargs[field] = value
+                    with self.assertRaises(SystemExit): hub.ingest_text(self.c, **kwargs)
+                    self.assertEqual(self.c.execute("SELECT count(*) FROM doc_sources").fetchone()[0], 0)
+        from unittest.mock import patch
+        with patch.object(hub.urllib.request, "urlopen") as fetch:
+            with self.assertRaises(SystemExit): hub.ingest(self.c, "https://user:pass@example.com")
+            fetch.assert_not_called()
+
+    def test_ownership_requires_identity_and_force_is_audited(self):
+        wid = hub.work_claim(self.c, "owner", "p", "safe")
+        self.assertEqual(self.cli("handoff", "add", "recipient", "safe").returncode, 0)
+        hid = self.c.execute("SELECT id FROM handoffs").fetchone()[0]
+        ops = [("work", "update", str(wid)), ("work", "release", str(wid)), ("handoff", "done", str(hid))]
+        for args in ops:
+            with self.subTest(args=args):
+                self.assertNotEqual(self.cli(*args, bot=None).returncode, 0)
+                self.assertNotEqual(self.cli(*args, bot="stranger").returncode, 0)
+                self.assertNotEqual(self.cli(*args, "--force", bot=None).returncode, 0)
+                result = self.cli(*args, "--force", bot="stranger")
+                self.assertEqual(result.returncode, 0, result.stderr)
+        audit = self.c.execute("SELECT * FROM audit_events").fetchall()
+        self.assertEqual(len(audit), 3)
+        self.assertTrue(all(r["actor"] == "stranger" and r["owner"] in ("owner", "recipient") for r in audit))
+        from unittest.mock import patch
+        with patch.dict(os.environ):
+            os.environ.pop("HUB_BOT", None)
+            with self.assertRaises(SystemExit): hub.work_update(self.c, wid)
+
+    def test_owner_identity_from_environment_and_explicit_flag(self):
+        for explicit in (False, True):
+            wid = hub.work_claim(self.c, "owner", "p", "task " + str(explicit))
+            args = ["--bot", "owner"] if explicit else []
+            env_bot = None if explicit else "owner"
+            self.assertEqual(self.cli("work", "update", str(wid), "--notes", "progress", *args, bot=env_bot).returncode, 0)
+            self.assertEqual(self.cli("work", "release", str(wid), *args, bot=env_bot).returncode, 0)
+            self.cli("handoff", "add", "owner", "action")
+            hid = self.c.execute("SELECT max(id) FROM handoffs").fetchone()[0]
+            self.assertEqual(self.cli("handoff", "done", str(hid), *args, bot=env_bot).returncode, 0)
+        self.assertEqual(self.c.execute("SELECT count(*) FROM audit_events").fetchone()[0], 0)
+
+    def test_database_created_private_even_with_permissive_umask(self):
+        old = os.umask(0)
+        try:
+            path = os.path.join(self.tmp, "private.db")
+            c = hub.connect(path); c.close()
+        finally: os.umask(old)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
     def test_home_default_and_db_override(self):
         with tempfile.TemporaryDirectory() as home:
             env = dict(os.environ, HUB_HOME=home, HUB_EMBED="none")

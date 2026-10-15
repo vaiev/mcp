@@ -24,7 +24,7 @@ schema when selecting another model.
 | --- | --- |
 | `HUB_HOME` | Install directory: `$HOME/.local/share/lead-kit/hub`; wrappers use their resolved directory when unset |
 | `HUB_DB` | `$HUB_HOME/hub.db`; parent directories are created |
-| `HUB_BOT` | Agent identity; no default. Author commands also accept `--bot` |
+| `HUB_BOT` | Unauthenticated coordination identity; no default. Commands also accept `--bot` |
 | `HUB_BIN_DIR` | Installer symlink directory: `$HOME/.local/bin` |
 | `HUB_PYTHON` | Wrapper interpreter: `$HUB_HOME/.venv/bin/python`, falling back to `python3` |
 | `HUB_EMBED` | `fastembed`; `none` disables vectors |
@@ -90,3 +90,8 @@ Validate from the repository root:
 python3 lead-kit/hub/test_hub.py
 bash -n lead-kit/install.sh lead-kit/hub/hub lead-kit/hub/kb-sources.sh
 ```
+
+`HUB_BOT` and `--bot` identities are unauthenticated. Claims and ownership checks
+are coordination only, not security. Work update/release and handoff done require an
+identity; handoff completion checks the recipient. `--force` overrides ownership and
+stores the actor, previous owner, operation and target in `audit_events`.

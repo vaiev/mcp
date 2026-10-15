@@ -7,7 +7,15 @@ DB = os.path.expanduser(os.environ.get("HUB_DB", os.path.join(HUB_HOME, "hub.db"
 NOTE_KINDS = ["fact", "decision", "approach", "lesson", "question", "link"]
 WORK_ST = ["planned", "active", "blocked", "done"]
 DEC_ST = ["proposed", "accepted", "rejected", "superseded"]
-SECRET_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY|\b(?:sk|ghp|gho|xox[abp]|AKIA)[-_A-Za-z0-9]{12,}|\b(?:\d{1,3}\.){3}\d{1,3}\b|(?:api[_-]?key|password|secret|token)\s*[:=]\s*\S{6,})", re.I)
+# One pattern set for both refusal and redaction. A truncated PEM consumes
+# the remainder so that key material cannot survive an incomplete document.
+SENSITIVE_RE = re.compile(
+    r"-----BEGIN [A-Z ]*PRIVATE KEY(?:-----)?[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\Z)"
+    r"|\b(?:sk|ghp|gho|github_pat|xox[abp]|AKIA)[-_A-Za-z0-9]{12,}"
+    r"|\b(?:\d{1,3}\.){3}\d{1,3}\b"
+    r'|[\"\']?(?:api[_-]?key|password|secret|token)[\"\']?\s*[:=]\s*(?:"[^"\n]*"|\'[^\'\n]*\'|[^\s&#/]+)'
+    r"|https?://[^/\s@]+@[^/\s]+", re.I)
+
 def now(): return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
 
 # ---------- embeddings (pluggable) ----------
@@ -40,6 +48,7 @@ CREATE TABLE IF NOT EXISTS handoffs(id INTEGER PRIMARY KEY, created TEXT, from_b
 CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY, project TEXT, title TEXT, status TEXT, rationale TEXT, decided_by TEXT, date TEXT);
 CREATE VIRTUAL TABLE IF NOT EXISTS decisions_fts USING fts5(title, rationale, project, content='decisions', content_rowid='id');
 CREATE TRIGGER IF NOT EXISTS dec_ai AFTER INSERT ON decisions BEGIN INSERT INTO decisions_fts(rowid,title,rationale,project) VALUES(new.id,new.title,new.rationale,new.project); END;
+CREATE TABLE IF NOT EXISTS audit_events(id INTEGER PRIMARY KEY, created TEXT, actor TEXT, operation TEXT, target_id INTEGER, owner TEXT);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS doc_sources(source TEXT PRIMARY KEY, url TEXT, project TEXT, file_hash TEXT, ingested TEXT, chunks INTEGER);
 CREATE TABLE IF NOT EXISTS docs(id INTEGER PRIMARY KEY, source TEXT, url TEXT, project TEXT, heading TEXT, body TEXT, chunk_hash TEXT, idx INTEGER);
@@ -53,7 +62,14 @@ class Conn(sqlite3.Connection):
 
 def connect(path=None):
     db_path = path or DB
-    if db_path != ":memory:": os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+    if db_path != ":memory:":
+        os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        try:
+            fd = os.open(db_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            os.close(fd)
     c = sqlite3.connect(db_path, timeout=30, isolation_level=None, factory=Conn)
     c.row_factory = sqlite3.Row
     c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA busy_timeout=30000")
@@ -70,7 +86,7 @@ def connect(path=None):
 
 def check_secret(*texts):
     for t in texts:
-        if t and SECRET_RE.search(t):
+        if t and SENSITIVE_RE.search(urllib.parse.unquote(t)):
             sys.exit("refused: text looks like it contains a secret/IP/key. Do NOT store secrets in the hub.")
 
 def index_vec(c, key, text):
@@ -84,7 +100,7 @@ def index_vec(c, key, text):
 # ---------- operations (also used by tests) ----------
 def note_add(c, author, project, kind, title, body="", tags=""):
     if kind not in NOTE_KINDS: raise ValueError(f"kind must be one of {NOTE_KINDS}")
-    check_secret(title, body, tags)
+    check_secret(author, project, kind, title, body, tags)
     nid = c.execute("INSERT INTO notes(created,author_bot,project,kind,title,body,tags) VALUES(?,?,?,?,?,?,?)",
                     (now(), author, project, kind, title, body, tags)).lastrowid
     index_vec(c, f"note:{nid}", f"{title}\n{body}\n{tags}")
@@ -92,7 +108,7 @@ def note_add(c, author, project, kind, title, body="", tags=""):
 
 def decision_add(c, project, title, rationale="", by="", status="proposed"):
     if status not in DEC_ST: raise ValueError(f"status must be one of {DEC_ST}")
-    check_secret(title, rationale)
+    check_secret(project, title, rationale, by, status)
     did = c.execute("INSERT INTO decisions(project,title,status,rationale,decided_by,date) VALUES(?,?,?,?,?,?)",
                     (project, title, status, rationale, by, now()[:10])).lastrowid
     index_vec(c, f"decision:{did}", f"{title}\n{rationale}")
@@ -134,6 +150,8 @@ def search(c, q, project=None, limit=10, mode="hybrid", kinds=None):
     return out[:limit], ("hybrid" if used_vec else "fts")
 
 def work_claim(c, bot, project, task, branch="", notes="", status="active"):
+    check_secret(bot, project, task, status, branch, notes)
+    if status not in WORK_ST: raise ValueError(f"status must be one of {WORK_ST}")
     try:
         return c.execute("INSERT INTO work(bot,project,task,status,branch_or_pr,updated,notes) VALUES(?,?,?,?,?,?,?)",
                          (bot, project, task, status, branch, now(), notes)).lastrowid
@@ -141,21 +159,29 @@ def work_claim(c, bot, project, task, branch="", notes="", status="active"):
         r = c.execute("SELECT * FROM work WHERE project=? AND lower(task)=lower(?) AND status!='done'", (project, task)).fetchone()
         raise RuntimeError(f"already claimed: work #{r['id']} by {r['bot']} ({r['status']})")
 
+def audit_force(c, actor, operation, target_id, owner):
+    check_secret(actor, operation, owner)
+    c.execute("INSERT INTO audit_events(created,actor,operation,target_id,owner) VALUES(?,?,?,?,?)",
+              (now(), actor, operation, target_id, owner))
+
+
 def work_update(c, wid, bot=None, status=None, branch=None, notes=None, force=False):
+    bot = bot_default(bot)
+    check_secret(bot, status, branch, notes)
     r = c.execute("SELECT * FROM work WHERE id=?", (wid,)).fetchone()
     if not r: raise RuntimeError(f"no work #{wid}")
-    if bot and r["bot"] != bot and not force: raise RuntimeError(f"work #{wid} belongs to {r['bot']} (use --force)")
+    if r["bot"] != bot and not force: raise RuntimeError(f"work #{wid} belongs to {r['bot']} (use --force)")
     if status and status not in WORK_ST: raise ValueError(f"status must be one of {WORK_ST}")
+    if force: audit_force(c, bot, "work.update", wid, r["bot"])
     c.execute("UPDATE work SET status=coalesce(?,status), branch_or_pr=coalesce(?,branch_or_pr), notes=coalesce(?,notes), updated=? WHERE id=?",
               (status, branch, notes, now(), wid))
 
 
 # ---------- document knowledge base ----------
-import hashlib, urllib.request
+import hashlib, urllib.request, urllib.parse
 DOC_EXT = (".md", ".markdown", ".txt", ".rst")
 SKIP_DIRS = {".git", "node_modules", "target", ".venv", "__pycache__", "dist", ".next"}
-REDACT_RE = re.compile(r"(-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----|\b(?:sk|ghp|gho|github_pat|xox[abp]|AKIA)[-_A-Za-z0-9]{12,}|\b(?:\d{1,3}\.){3}\d{1,3}\b|(?:api[_-]?key|password|secret|token)\s*[:=]\s*\S{6,})", re.I | re.S)
-def redact(t): return REDACT_RE.sub("<redacted>", t)
+def redact(t): return SENSITIVE_RE.sub("<redacted>", t)
 def read_text(p, errors="strict"):
     with open(p, encoding="utf-8", errors=errors) as fh: return fh.read()
 def sha(t): return hashlib.sha256(t.encode()).hexdigest()
@@ -188,10 +214,12 @@ def chunk_text(text, max_chars=1800):
 
 def ingest_text(c, source, text, project="general", url=None, force=False):
     """Ingest one document. Skips if unchanged (file hash). Returns number of chunks stored (-1 = unchanged)."""
+    check_secret(source, url, project)
     fh = sha(text)
     old = c.execute("SELECT file_hash FROM doc_sources WHERE source=?", (source,)).fetchone()
     if old and old["file_hash"] == fh and not force: return -1
-    text = redact(text)
+    text = redact(urllib.parse.unquote(text))
+    check_secret(text)
     for r in c.execute("SELECT id FROM docs WHERE source=?", (source,)).fetchall():
         if c.vec: c.execute("DELETE FROM vec_items WHERE key=?", (f"doc:{r['id']}",))
     c.execute("DELETE FROM docs WHERE source=?", (source,))
@@ -209,6 +237,7 @@ def ingest_text(c, source, text, project="general", url=None, force=False):
 
 def ingest(c, target, project="general", url_base=None, force=False):
     """Ingest a file, a directory (recursively, text/markdown only) or an http(s) URL. Returns stats dict."""
+    check_secret(target, project, url_base)
     st = {"files": 0, "chunks": 0, "unchanged": 0}
     def one(src, text, url):
         n = ingest_text(c, src, text, project, url, force); st["files"] += 1
@@ -306,7 +335,7 @@ def main(argv=None):
     h = sp.add_parser("handoff").add_subparsers(dest="sub", required=True)
     x = h.add_parser("add"); x.add_argument("to_bot"); x.add_argument("payload"); x.add_argument("--project", default="general"); x.add_argument("--bot")
     x = h.add_parser("list"); x.add_argument("--to"); x.add_argument("--all", action="store_true")
-    x = h.add_parser("done"); x.add_argument("id", type=int)
+    x = h.add_parser("done"); x.add_argument("id", type=int); x.add_argument("--bot"); x.add_argument("--force", action="store_true")
     d = sp.add_parser("decision").add_subparsers(dest="sub", required=True)
     x = d.add_parser("add"); x.add_argument("title"); x.add_argument("--project", required=True); x.add_argument("--rationale", default="")
     x.add_argument("--status", default="proposed", choices=DEC_ST); x.add_argument("--bot")
@@ -368,7 +397,7 @@ def dispatch(c, a):
             emit(a, rs, "\n".join(f"#{r['id']} {r['status']:8} {r['bot']:16} ({r['project']}) {r['task']} {r['branch_or_pr'] or ''}" for r in rs))
     elif cmd == "handoff":
         if sub == "add":
-            check_secret(a.payload)
+            check_secret(bot_default(a.bot), a.to_bot, a.project, a.payload)
             i = c.execute("INSERT INTO handoffs(created,from_bot,to_bot,project,payload,status) VALUES(?,?,?,?,?,'open')",
                           (now(), bot_default(a.bot), a.to_bot, a.project, a.payload)).lastrowid
             emit(a, {"id": i}, f"handoff #{i} -> {a.to_bot}")
@@ -379,6 +408,12 @@ def dispatch(c, a):
             rs = rows(c, q + " ORDER BY id DESC", pp)
             emit(a, rs, "\n".join(f"#{r['id']} {r['status']} {r['from_bot']} -> {r['to_bot']} ({r['project']}): {r['payload']}" for r in rs))
         elif sub == "done":
+            bot = bot_default(a.bot)
+            check_secret(bot)
+            r = c.execute("SELECT to_bot FROM handoffs WHERE id=?", (a.id,)).fetchone()
+            if not r: raise RuntimeError(f"no handoff #{a.id}")
+            if r["to_bot"] != bot and not a.force: raise RuntimeError(f"handoff #{a.id} belongs to {r['to_bot']} (use --force)")
+            if a.force: audit_force(c, bot, "handoff.done", a.id, r["to_bot"])
             if not c.execute("UPDATE handoffs SET status='done' WHERE id=?", (a.id,)).rowcount: raise RuntimeError(f"no handoff #{a.id}")
             emit(a, {"id": a.id, "ok": True}, f"handoff #{a.id} done")
     elif cmd == "decision":
@@ -391,6 +426,7 @@ def dispatch(c, a):
             rs = rows(c, q + " ORDER BY id DESC", pp)
             emit(a, rs, "\n".join(f"#{r['id']} {r['status']:10} ({r['project']}) {r['title']} [{r['decided_by']} {r['date']}]" for r in rs))
         elif sub == "set":
+            check_secret(a.status, a.bot or os.environ.get("HUB_BOT"))
             if not c.execute("UPDATE decisions SET status=?, date=?, decided_by=coalesce(?,decided_by) WHERE id=?",
                              (a.status, now()[:10], a.bot or os.environ.get("HUB_BOT"), a.id)).rowcount: raise RuntimeError(f"no decision #{a.id}")
             emit(a, {"id": a.id, "status": a.status}, f"decision #{a.id} -> {a.status}")

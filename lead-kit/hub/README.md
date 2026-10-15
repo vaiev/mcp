@@ -34,3 +34,12 @@ Tests use temporary databases:
 ```sh
 python3 lead-kit/hub/test_hub.py
 ```
+
+`HUB_BOT` and `--bot` identities are unauthenticated. Claims and ownership checks
+are coordination only, not security. Work update/release and handoff done require an
+identity; handoff completion checks the recipient. `--force` overrides ownership and
+stores the actor, previous owner, operation and target in `audit_events`.
+
+All supplied stored text is checked for recognizable secrets and IP addresses. Ingest
+redacts document content and refuses sensitive source paths, URLs and projects, including
+URL credentials and credential query parameters. New database files use mode `0600`.

@@ -21,7 +21,7 @@ done
 chmod +x "$HUB_HOME/hub" "$HUB_HOME/kb-sources.sh"
 if "$WITH_VECTORS"; then
     [[ -x "$HUB_HOME/.venv/bin/python" ]] || python3 -m venv "$HUB_HOME/.venv"
-    "$HUB_HOME/.venv/bin/python" -m pip install sqlite-vec fastembed
+    "$HUB_HOME/.venv/bin/python" -m pip install sqlite-vec==0.1.9 fastembed==0.8.0
 fi
 if [[ -e "$HUB_BIN_DIR/hub" && ! -L "$HUB_BIN_DIR/hub" ]]; then
     echo "Refusing to replace existing file: $HUB_BIN_DIR/hub" >&2; exit 1
