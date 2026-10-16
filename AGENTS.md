@@ -7,7 +7,7 @@ Code, comments, specs, commit messages and PRs: English.
 
 ## Workflow
 - TDD: add or update a failing test first, then the fix. Run the full test suite before every commit.
-- Test command: `python3 sidecomputer/tests/test_sidecomputer.py`
+- Test commands: `python3 sidecomputer/tests/test_sidecomputer.py`, `python3 lead-kit/hub/test_hub.py`, `python3 control-mcp/tests/test_control_core.py`
 - Small, focused commits with conventional prefixes (`fix:`, `feat:`, `docs:`, `test:`, `chore:`).
 - Work on a branch and open a PR. Never push to `main` directly.
 - PRs in vaiev/mcp and vaiev/skills merge only after Review Bot approves.
@@ -24,3 +24,4 @@ Code, comments, specs, commit messages and PRs: English.
 - `sidecomputer/bootstrap.sh`: host installer (the only key writer)
 - `sidecomputer/profiles/`: task profiles
 - `sidecomputer/tests/`: test suite
+- `control-mcp/`: control server template (`control_core.py` without SDK dependency, `server.py`, `control.example.toml`, `tests/`)
