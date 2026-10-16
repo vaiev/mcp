@@ -1,0 +1,41 @@
+# Example control.toml: copy it next to server.py (or point CONTROL_CONFIG at it) and adapt.
+# Every action is an argv list (no shell). Placeholders {name} must be declared under params with a regex;
+# a value that does not match it fully is refused. kind = "read" runs freely; kind = "change" needs an
+# approval "<who> <YYYY-MM-DD>: <what>" and is written to audit_log before and after it runs.
+# Built-in deny patterns (destroy, delete, rm -r, DROP, push --force) refuse an action even with an approval.
+
+[settings]
+workdir = "."                     # relative to this file: the project root
+audit_log = "docs/OPS-LOG.md"
+timeout_seconds = 300
+max_output = 8000
+env_passthrough = []              # extra environment variables the commands may see (names only)
+deny = ['\bopenstack\s+.*\bset\b'] # project-specific additions to the built-in deny list
+
+[actions.dns_lookup]
+kind = "read"
+description = "Public DNS answer for a name (dig +short)."
+argv = ["dig", "+short", "{name}", "{rtype}"]
+[actions.dns_lookup.params]
+name = '^[a-z0-9]([a-z0-9-]{0,62}\.)+[a-z]{2,63}$'
+rtype = '^(A|AAAA|CNAME|MX|TXT|NS|SOA|DS|DNSKEY|CAA)$'
+
+[actions.infra_plan]
+kind = "read"
+description = "OpenTofu plan through the project's wrapper (reads credentials itself, prints no secrets)."
+argv = ["infra/tofu.sh", "plan"]
+timeout_seconds = 600
+
+[actions.infra_apply]
+kind = "change"
+description = "Apply the plan the wrapper saved last (run infra_plan first and read it)."
+argv = ["infra/tofu.sh", "apply"]
+timeout_seconds = 900
+
+[actions.service_deploy]
+kind = "change"
+description = "Deploy one service at one git revision through the project's deploy script."
+argv = ["deploy/deploy.sh", "{service}", "{rev}"]
+[actions.service_deploy.params]
+service = '^[a-z][a-z0-9-]{1,30}$'
+rev = '^[0-9a-f]{7,40}$'

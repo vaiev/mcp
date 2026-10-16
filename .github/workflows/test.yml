@@ -22,3 +22,5 @@ jobs:
         run: python3 sidecomputer/tests/test_sidecomputer.py
       - name: Run lead-kit tests
         run: python3 lead-kit/hub/test_hub.py
+      - name: Run control-mcp tests
+        run: python3 control-mcp/tests/test_control_core.py
